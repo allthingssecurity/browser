@@ -85,6 +85,16 @@ rsync -a --delete "$PROJECT_DIR/" "$PWD/$APP_NAME/" 2>/dev/null || {
   (cd "$PROJECT_DIR" && tar cf - .) | (cd "$PWD/$APP_NAME" && tar xf -);
 }
 
+# Ensure a root-level README exists for GitHub repo homepage
+if [[ -f "$PWD/$APP_NAME/README.md" ]]; then
+  if [[ ! -f README.md || "${FORCE_ROOT_README:-0}" == "1" ]]; then
+    echo "==> Updating root README.md from $APP_NAME/README.md"
+    cp -f "$PWD/$APP_NAME/README.md" README.md
+  else
+    echo "Root README.md exists; leave as is (set FORCE_ROOT_README=1 to overwrite)."
+  fi
+fi
+
 # Optionally keep top-level releases folder for convenience
 mkdir -p releases
 cp -f "$DIST_DIR/$APP_NAME.dmg" releases/ 2>/dev/null || true
@@ -94,7 +104,7 @@ cp -f "$DIST_DIR/$APP_NAME.dmg" releases/ 2>/dev/null || true
 git remote set-url origin "https://$GITHUB_TOKEN@github.com/$REPO_SLUG.git"
 
 echo "==> Committing code and artifacts"
-git add "$APP_NAME" releases || true
+git add "$APP_NAME" releases README.md || true
 if ! git diff --cached --quiet; then
   git commit -m "Add $APP_NAME app, build scripts, and release artifacts ($TAG_NAME)"
   git push origin "$DEFAULT_BRANCH"
