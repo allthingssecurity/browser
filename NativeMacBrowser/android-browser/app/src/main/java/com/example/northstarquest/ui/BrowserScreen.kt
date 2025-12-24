@@ -3,6 +3,7 @@ package com.example.northstarquest.ui
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.content.Context
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.PermissionRequest
@@ -12,11 +13,15 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -53,6 +58,36 @@ fun BrowserScreen(initialUrl: String) {
     var currentUrl by remember { mutableStateOf(initialUrl) }
     var isEditing by remember { mutableStateOf(false) }
     var textFieldValue by remember { mutableStateOf(TextFieldValue(initialUrl)) }
+
+    // Simple URL history persisted in SharedPreferences
+    val appContext = LocalContext.current.applicationContext
+    val history = remember { mutableStateListOf<String>() }
+
+    fun loadHistory(ctx: Context): MutableList<String> {
+        val prefs = ctx.getSharedPreferences("browser_prefs", Context.MODE_PRIVATE)
+        val raw = prefs.getString("history", "") ?: ""
+        return if (raw.isBlank()) mutableListOf() else raw.split('\n').filter { it.isNotBlank() }.toMutableList()
+    }
+
+    fun saveHistory(ctx: Context, list: List<String>) {
+        val prefs = ctx.getSharedPreferences("browser_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putString("history", list.joinToString("\n")).apply()
+    }
+
+    fun addToHistory(ctx: Context, url: String) {
+        if (url.isBlank()) return
+        val clean = url.trim()
+        val existing = history.toMutableList()
+        existing.removeAll { it.equals(clean, ignoreCase = true) }
+        existing.add(0, clean)
+        val capped = existing.take(50)
+        history.clear(); history.addAll(capped)
+        saveHistory(ctx, capped)
+    }
+
+    LaunchedEffect(Unit) {
+        history.clear(); history.addAll(loadHistory(appContext))
+    }
 
     // Sync the address bar to the current page URL when not editing
     LaunchedEffect(isEditing, currentUrl) {
@@ -142,18 +177,25 @@ fun BrowserScreen(initialUrl: String) {
                     ),
                     leadingIcon = { Icon(leadingIcon, contentDescription = null) },
                     trailingIcon = {
-                        IconButton(
-                            onClick = {
-                                normalizeForGo(textFieldValue.text)?.let { normalized ->
-                                    currentUrl = normalized
-                                    webViewRef?.loadUrl(normalized)
-                                    isEditing = false
-                                    focusManager.clearFocus()
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (textFieldValue.text.isNotEmpty()) {
+                                IconButton(onClick = { textFieldValue = TextFieldValue("") }) {
+                                    Icon(Icons.Filled.Close, contentDescription = "Clear")
                                 }
-                            },
-                            enabled = canGo
-                        ) {
-                            Icon(Icons.Filled.Send, contentDescription = "Go")
+                            }
+                            IconButton(
+                                onClick = {
+                                    normalizeForGo(textFieldValue.text)?.let { normalized ->
+                                        currentUrl = normalized
+                                        webViewRef?.loadUrl(normalized)
+                                        isEditing = false
+                                        focusManager.clearFocus()
+                                    }
+                                },
+                                enabled = canGo
+                            ) {
+                                Icon(Icons.Filled.Send, contentDescription = "Go")
+                            }
                         }
                     }
                 )
@@ -170,6 +212,34 @@ fun BrowserScreen(initialUrl: String) {
         )
 
         // Removed linear top loading bar for a cleaner look
+
+        // Suggestions list from history while editing
+        val suggestions = remember(isEditing, textFieldValue.text, history) {
+            if (isEditing) history.filter { it.contains(textFieldValue.text.trim(), ignoreCase = true) }.take(8) else emptyList()
+        }
+        if (isEditing && suggestions.isNotEmpty()) {
+            Surface(tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth()) {
+                LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                    items(suggestions) { item ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    textFieldValue = TextFieldValue(item)
+                                    currentUrl = item
+                                    webViewRef?.loadUrl(item)
+                                    isEditing = false
+                                }
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Filled.Public, contentDescription = null, modifier = Modifier.padding(end = 8.dp))
+                            Text(item, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        }
 
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
@@ -204,7 +274,10 @@ fun BrowserScreen(initialUrl: String) {
                                 isLoading = false
                                 canGoBack = this@apply.canGoBack()
                                 canGoForward = this@apply.canGoForward()
-                                url?.let { currentUrl = it }
+                                url?.let {
+                                    currentUrl = it
+                                    addToHistory(context.applicationContext, it)
+                                }
                             }
 
                             override fun shouldOverrideUrlLoading(
