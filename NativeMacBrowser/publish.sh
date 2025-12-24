@@ -16,6 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
 DIST_DIR="$PROJECT_DIR/dist"
 INFO_PLIST="$PROJECT_DIR/Info.plist"
+APK_PATH="$PROJECT_DIR/android-browser/app/build/outputs/apk/debug/app-debug.apk"
 
 REPO_SLUG="${GITHUB_REPO:-allthingssecurity/browser}"
 GIT_NAME="${GIT_AUTHOR_NAME:-Release Bot}"
@@ -26,7 +27,7 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   exit 1
 fi
 
-echo "==> Ensuring build artifacts exist"
+echo "==> Ensuring build artifacts exist (macOS)"
 if [[ ! -f "$DIST_DIR/$APP_NAME.dmg" ]]; then
   echo "Artifacts not found. Running build.sh ..."
   bash "$PROJECT_DIR/build.sh"
@@ -99,6 +100,7 @@ fi
 mkdir -p releases
 cp -f "$DIST_DIR/$APP_NAME.dmg" releases/ 2>/dev/null || true
 [[ -f "$ZIP_PATH" ]] && cp -f "$ZIP_PATH" releases/ || true
+[[ -f "$APK_PATH" ]] && cp -f "$APK_PATH" releases/ || true
 
 # Ensure authenticated remote for pushes
 git remote set-url origin "https://$GITHUB_TOKEN@github.com/$REPO_SLUG.git"
@@ -122,7 +124,7 @@ CREATE_JSON=$(cat <<JSON
 {
   "tag_name": "$TAG_NAME",
   "name": "$RELEASE_NAME",
-  "body": "Automated release for $APP_NAME $VERSION (build $BUILD_NO).\n\nAssets include .dmg and zipped .app.",
+  "body": "Automated release for $APP_NAME $VERSION (build $BUILD_NO).\n\nAssets include macOS .dmg, zipped .app, and Android APK (if present).",
   "draft": false,
   "prerelease": false
 }
@@ -163,6 +165,14 @@ if [[ -f "$ZIP_PATH" ]]; then
   curl -sS -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/octet-stream" \
     --data-binary @"$ZIP_PATH" \
     "$UPLOAD_BASE$(basename "$ZIP_PATH")" >/dev/null || true
+fi
+
+if [[ -f "$APK_PATH" ]]; then
+  echo "Uploading Android APK..."
+  APK_NAME_BASENAME="${APP_NAME}-android-debug.apk"
+  curl -sS -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/octet-stream" \
+    --data-binary @"$APK_PATH" \
+    "$UPLOAD_BASE$APK_NAME_BASENAME" >/dev/null || true
 fi
 
 echo "\nPublish complete."

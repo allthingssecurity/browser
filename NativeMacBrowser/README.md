@@ -52,6 +52,53 @@ Artifacts
 - Disk image: `NativeMacBrowser/dist/NativeMacBrowser.dmg`
 - Release assets (after publish): on your GitHub repo’s Releases page
 
+Android Browser (WebView)
+------------------------
+An Android variant lives under `android-browser/` and builds a simple WebView-based browser with a Chrome-like address bar that clears on focus, auto‑prefixes `https://`, and falls back to search.
+
+- Path: `android-browser/`
+- App id: `com.example.northstarquest`
+- Entry: `app/src/main/java/com/example/northstarquest/MainActivity.kt`
+- UI: `app/src/main/java/com/example/northstarquest/ui/BrowserScreen.kt`
+- Ignore rules: `android-browser/.gitignore` (keeps Gradle/IDE/build files out of git)
+
+Setup (JDK + Android SDK)
+- JDK 17 (Homebrew):
+  - `brew install openjdk@17`
+  - `export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"`
+  - `export PATH="$JAVA_HOME/bin:$PATH"`
+- Android commandline tools + platform-tools:
+  - `brew install --cask android-commandlinetools android-platform-tools`
+  - `export ANDROID_SDK_ROOT="$(brew --prefix)/share/android-commandlinetools"`
+  - Accept/install packages:
+    - `yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses`
+    - `sdkmanager --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "build-tools;34.0.0" "platforms;android-34"`
+- SDK path for Gradle:
+  - Create `android-browser/local.properties` with:
+    - `sdk.dir=/Users/<you>/homebrew/share/android-commandlinetools`
+
+Build APK
+- `cd android-browser && ./gradlew assembleDebug`
+- Output: `android-browser/app/build/outputs/apk/debug/app-debug.apk`
+
+Run on Emulator
+- Create AVD (one-time):
+  - `sdkmanager --sdk_root="$ANDROID_SDK_ROOT" "system-images;android-34;google_apis;arm64-v8a"`
+  - `echo no | avdmanager create avd -n Pixel_34 -k "system-images;android-34;google_apis;arm64-v8a"`
+- Start + install + launch:
+  - `"$ANDROID_SDK_ROOT/emulator/emulator" -avd Pixel_34 -netdelay none -netspeed full -no-snapshot &`
+  - `adb wait-for-device; until adb shell getprop sys.boot_completed | grep -m1 1; do sleep 2; done`
+  - `adb install -r android-browser/app/build/outputs/apk/debug/app-debug.apk`
+  - `adb shell am start -n com.example.northstarquest/.MainActivity`
+
+Run on Device
+- Enable Developer options and USB debugging.
+- `adb devices` shows the phone; then `adb install -r <apk>` and launch as above.
+
+Notes
+- The Android app handles `VIEW` intents for `http/https` and allows clear‑text traffic for local testing. Remove `usesCleartextTraffic` before production.
+- To change the default start page, edit `MainActivity.kt` (`startUrl`).
+
 Implementation Notes
 --------------------
 - Primary implementation (Objective‑C fallback): `NativeMacBrowser/ObjCSources/AppDelegate.m:1`, `NativeMacBrowser/ObjCSources/main.m:1`
