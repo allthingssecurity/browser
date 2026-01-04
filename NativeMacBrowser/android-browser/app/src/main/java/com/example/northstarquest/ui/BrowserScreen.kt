@@ -4,7 +4,10 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.content.Context
+import android.net.http.SslError
+import android.os.Build
 import android.view.ViewGroup
+import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
 import android.webkit.PermissionRequest
 import android.webkit.WebResourceRequest
@@ -12,56 +15,398 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.layout.*
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.filled.Public
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.material.icons.filled.Send
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.text.input.TextFieldValue
-import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.northstarquest.BackgroundAudioService
+import android.webkit.WebResourceResponse
 import java.net.URLEncoder
+
+/**
+ * YouTube Ad Blocker - JavaScript injection script
+ * This script runs on YouTube pages to:
+ * 1. Auto-click "Skip Ad" buttons
+ * 2. Hide ad overlays and banners (but NOT player controls)
+ * 
+ * FIXED: Removed features that were breaking video playback:
+ * - Removed aggressive CSS that hid player controls
+ * - Removed video speedup/muting that broke audio
+ */
+private const val YOUTUBE_AD_BLOCK_SCRIPT = """
+(function() {
+    'use strict';
+    
+    // Prevent multiple injections
+    if (window.__ytAdBlockerInjected) return;
+    window.__ytAdBlockerInjected = true;
+    
+    // Configuration
+    const CONFIG = {
+        skipButtonInterval: 250,  // Check for skip button every 250ms
+        adCheckInterval: 500,     // Check for ads every 500ms
+        debug: false
+    };
+    
+    function log(msg) {
+        if (CONFIG.debug) console.log('[YT-AdBlock] ' + msg);
+    }
+    
+    // CSS to hide ONLY ad overlay elements (NOT player controls)
+    const adBlockCSS = `
+        /* Hide overlay ads and banners - but NOT player controls */
+        .ytp-ad-overlay-slot,
+        .ytp-ad-text-overlay,
+        .ytp-ad-overlay-container,
+        .ytp-ad-overlay-close-button,
+        .ytp-ad-image-overlay,
+        .ytp-ad-preview-container,
+        .ytp-ad-message-container,
+        .ytd-action-companion-ad-renderer,
+        ytd-promoted-sparkles-web-renderer,
+        ytd-companion-slot-renderer,
+        ytd-promoted-video-renderer,
+        ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-ads"],
+        #masthead-ad,
+        #player-ads,
+        .ytd-banner-promo-renderer,
+        ytd-in-feed-ad-layout-renderer,
+        ytd-ad-slot-renderer,
+        .ytp-featured-product,
+        .ytp-suggested-action,
+        .iv-branding,
+        ytd-mealbar-promo-renderer,
+        yt-mealbar-promo-renderer,
+        ytd-statement-banner-renderer,
+        .ytd-merch-shelf-renderer {
+            display: none !important;
+            visibility: hidden !important;
+            height: 0 !important;
+            opacity: 0 !important;
+        }
+    `;
+    
+    // Inject CSS
+    function injectCSS() {
+        if (document.getElementById('yt-adblock-css')) return;
+        const style = document.createElement('style');
+        style.id = 'yt-adblock-css';
+        style.textContent = adBlockCSS;
+        (document.head || document.documentElement).appendChild(style);
+        log('CSS injected');
+    }
+    
+    // Click skip button if available
+    function clickSkipButton() {
+        const skipButtons = [
+            '.ytp-ad-skip-button',
+            '.ytp-ad-skip-button-modern',
+            '.ytp-skip-ad-button',
+            'button.ytp-ad-skip-button-modern',
+            '.ytp-ad-skip-button-container button',
+            '.videoAdUiSkipButton',
+            '.ytp-ad-skip-button-text'
+        ];
+        
+        for (const selector of skipButtons) {
+            const btn = document.querySelector(selector);
+            if (btn && btn.offsetParent !== null) {
+                btn.click();
+                log('Clicked skip button: ' + selector);
+                return true;
+            }
+        }
+        
+        // Also try clicking by text content
+        const allButtons = document.querySelectorAll('button, .ytp-ad-button');
+        for (const btn of allButtons) {
+            const text = btn.textContent?.toLowerCase() || '';
+            if (text.includes('skip') && btn.offsetParent !== null) {
+                btn.click();
+                log('Clicked skip button by text');
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    // Skip ad by seeking to end (gentle approach - doesn't mute or change speed)
+    function trySkipAd() {
+        const adShowing = document.querySelector('.ad-showing');
+        if (!adShowing) return false;
+        
+        const video = document.querySelector('.html5-main-video');
+        if (!video) return false;
+        
+        // Only try to skip short ads by seeking to end
+        // This preserves audio state
+        if (video.duration && video.duration < 120 && video.duration > 0) {
+            // Don't seek if we're already near the end
+            if (video.currentTime < video.duration - 1) {
+                video.currentTime = video.duration - 0.1;
+                log('Seeked to end of ad');
+            }
+        }
+        
+        return true;
+    }
+    
+    // Remove ad elements from DOM (banner ads, not video player elements)
+    function removeAdElements() {
+        const adSelectors = [
+            'ytd-promoted-sparkles-web-renderer',
+            'ytd-promoted-video-renderer',
+            'ytd-ad-slot-renderer',
+            'ytd-in-feed-ad-layout-renderer',
+            'ytd-banner-promo-renderer',
+            '#masthead-ad'
+        ];
+        
+        adSelectors.forEach(selector => {
+            document.querySelectorAll(selector).forEach(el => {
+                el.remove();
+                log('Removed: ' + selector);
+            });
+        });
+    }
+    
+    // Close any ad-related overlay/popup
+    function closeAdOverlays() {
+        // Close overlay ads
+        const closeButtons = [
+            '.ytp-ad-overlay-close-button',
+            '.ytp-ad-skip-button-icon'
+        ];
+        
+        closeButtons.forEach(selector => {
+            const btn = document.querySelector(selector);
+            if (btn && btn.offsetParent !== null) {
+                btn.click();
+                log('Closed overlay: ' + selector);
+            }
+        });
+    }
+    
+    // Main ad blocking loop
+    function blockAds() {
+        injectCSS();
+        
+        // Try skip button first (safest)
+        if (!clickSkipButton()) {
+            // If no skip button, try seeking
+            trySkipAd();
+        }
+        
+        closeAdOverlays();
+        removeAdElements();
+    }
+    
+    // Initialize
+    function init() {
+        log('Initializing YouTube Ad Blocker v2');
+        
+        // Initial run
+        blockAds();
+        
+        // Set up intervals
+        setInterval(clickSkipButton, CONFIG.skipButtonInterval);
+        setInterval(blockAds, CONFIG.adCheckInterval);
+        
+        // Also run on DOM changes (for dynamic content)
+        let lastCheck = Date.now();
+        const observer = new MutationObserver(() => {
+            // Throttle to avoid performance issues
+            if (Date.now() - lastCheck > 200) {
+                lastCheck = Date.now();
+                clickSkipButton();
+            }
+        });
+        
+        observer.observe(document.body || document.documentElement, {
+            childList: true,
+            subtree: true
+        });
+        
+        log('YouTube Ad Blocker v2 initialized');
+    }
+    
+    // Start when DOM is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+    
+    // Also run on page navigation (YouTube is a SPA)
+    let lastUrl = location.href;
+    new MutationObserver(() => {
+        if (location.href !== lastUrl) {
+            lastUrl = location.href;
+            log('Page navigation detected');
+            setTimeout(blockAds, 500);
+        }
+    }).observe(document, { subtree: true, childList: true });
+    
+})();
+"""
+
+/**
+ * List of URL patterns to block for ads
+ * CONSERVATIVE list - only blocks external ad networks
+ * Avoiding YouTube internal URLs that might break the player
+ */
+private val AD_BLOCK_PATTERNS = listOf(
+    // External ad networks only (safe to block)
+    "doubleclick.net",
+    "googleadservices.com",
+    "googlesyndication.com",
+    "moatads.com",
+    "adsrvr.org",
+    "adnxs.com",
+    "scorecardresearch.com",
+    "2mdn.net"
+    // Note: We intentionally don't block YouTube internal ad URLs
+    // as they can break the video player, scrubber, and audio
+)
+
+/**
+ * Check if a URL should be blocked
+ */
+private fun shouldBlockUrl(url: String): Boolean {
+    val lowerUrl = url.lowercase()
+    return AD_BLOCK_PATTERNS.any { pattern ->
+        if (pattern.contains("*")) {
+            // Simple wildcard matching
+            val regex = pattern.replace(".", "\\.").replace("*", ".*")
+            lowerUrl.matches(Regex(".*$regex.*"))
+        } else {
+            lowerUrl.contains(pattern)
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BrowserScreen(initialUrl: String) {
     val context = LocalContext.current
+    val appContext = context.applicationContext
 
+    // Loading & Progress
     var isLoading by remember { mutableStateOf(true) }
-    var progress by remember { mutableStateOf(0) }
+    var progress by remember { mutableFloatStateOf(0f) }
+
+    // Navigation state
     var canGoBack by remember { mutableStateOf(false) }
     var canGoForward by remember { mutableStateOf(false) }
+
+    // URL & editing state
     var currentUrl by remember { mutableStateOf(initialUrl) }
     var isEditing by remember { mutableStateOf(false) }
-    var textFieldValue by remember { mutableStateOf(TextFieldValue(initialUrl)) }
+    var textFieldValue by remember { mutableStateOf(initialUrl) }
 
-    // Simple URL history persisted in SharedPreferences
-    val appContext = LocalContext.current.applicationContext
+    // Find in page state
+    var isFindMode by remember { mutableStateOf(false) }
+    var findQuery by remember { mutableStateOf("") }
+    var findMatchCount by remember { mutableIntStateOf(0) }
+    var findCurrentMatch by remember { mutableIntStateOf(0) }
+    val findFocusRequester = remember { FocusRequester() }
+    
+    // Address bar focus requester
+    val addressFocusRequester = remember { FocusRequester() }
+
+    // SSL error dialog state
+    var showSslDialog by remember { mutableStateOf(false) }
+    var sslErrorMessage by remember { mutableStateOf("") }
+    var pendingSslHandler by remember { mutableStateOf<SslErrorHandler?>(null) }
+
+    // URL history
     val history = remember { mutableStateListOf<String>() }
+
+    // Single WebView reference (using custom class for background audio support)
+    var webViewRef by remember { mutableStateOf<BackgroundAudioWebView?>(null) }
+    
+    // Background audio is always enabled by default
+    val isBackgroundAudioEnabled = true
+    val lifecycleOwner = LocalLifecycleOwner.current
+    
+    // Helper functions for background audio service
+    fun startBackgroundAudioService(ctx: Context) {
+        val serviceIntent = Intent(ctx, BackgroundAudioService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ContextCompat.startForegroundService(ctx, serviceIntent)
+        } else {
+            ctx.startService(serviceIntent)
+        }
+    }
+    
+    fun stopBackgroundAudioService(ctx: Context) {
+        ctx.stopService(Intent(ctx, BackgroundAudioService::class.java))
+    }
+    
+    // Handle lifecycle for background audio
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    // App going to background - start foreground service to keep audio alive
+                    if (isBackgroundAudioEnabled) {
+                        startBackgroundAudioService(appContext)
+                    }
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    // App coming to foreground - stop foreground service
+                    stopBackgroundAudioService(appContext)
+                }
+                Lifecycle.Event.ON_DESTROY -> {
+                    stopBackgroundAudioService(appContext)
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            stopBackgroundAudioService(appContext)
+        }
+    }
 
     fun loadHistory(ctx: Context): MutableList<String> {
         val prefs = ctx.getSharedPreferences("browser_prefs", Context.MODE_PRIVATE)
@@ -89,27 +434,40 @@ fun BrowserScreen(initialUrl: String) {
         history.clear(); history.addAll(loadHistory(appContext))
     }
 
-    // Sync the address bar to the current page URL when not editing
-    LaunchedEffect(isEditing, currentUrl) {
+    // Sync address bar with current URL when not editing
+    LaunchedEffect(currentUrl) {
         if (!isEditing) {
-            textFieldValue = TextFieldValue(currentUrl)
+            val cleanUrl = currentUrl
+                .removePrefix("https://")
+                .removePrefix("http://")
+                .removePrefix("www.")
+                .trimEnd('/')
+            textFieldValue = cleanUrl
         }
     }
 
-    // Hold a reference to the WebView to drive navigation from UI controls
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    // Focus find input when entering find mode
+    LaunchedEffect(isFindMode) {
+        if (isFindMode) {
+            findFocusRequester.requestFocus()
+        } else {
+            webViewRef?.clearMatches()
+            findQuery = ""
+            findMatchCount = 0
+            findCurrentMatch = 0
+        }
+    }
 
     fun normalizeInputToUrlOrSearch(input: String): String {
         val trimmed = input.trim()
-        if (trimmed.isEmpty()) return "https://www.google.com"
+        if (trimmed.isEmpty()) return "https://www.google.com?hl=en"
         val lower = trimmed.lowercase()
         val hasScheme = lower.startsWith("http://") || lower.startsWith("https://")
-        // Treat single-label hosts too (e.g., "intranet") to avoid disabling Go
-        val looksLikeHost = Regex("^[a-zA-Z0-9-]+(\\.[a-zA-Z0-9-]+)*(\\/.*)?$").matches(trimmed)
+        val looksLikeHost = Regex("^[a-zA-Z0-9-]+(\\.[a-zA-Z0-9-]+)*(/.*)?$").matches(trimmed)
         return when {
             hasScheme -> trimmed
             looksLikeHost -> "https://$trimmed"
-            else -> "https://www.google.com/search?q=" + URLEncoder.encode(trimmed, "UTF-8")
+            else -> "https://www.google.com/search?hl=en&q=" + URLEncoder.encode(trimmed, "UTF-8")
         }
     }
 
@@ -119,133 +477,385 @@ fun BrowserScreen(initialUrl: String) {
         return normalizeInputToUrlOrSearch(trimmed)
     }
 
-    BackHandler(enabled = canGoBack) {
-        webViewRef?.goBack()
+    // Handle back press
+    BackHandler(enabled = canGoBack || isFindMode) {
+        when {
+            isFindMode -> isFindMode = false
+            canGoBack -> webViewRef?.goBack()
+        }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // Top app bar with Chrome-like address bar
-        TopAppBar(
-            title = {
-                val focusManager = LocalFocusManager.current
-                val displayForSecurity = if (isEditing) textFieldValue.text else currentUrl
-                val leadingIcon = when {
-                    displayForSecurity.startsWith("https://", ignoreCase = true) -> Icons.Filled.Lock
-                    displayForSecurity.startsWith("http://", ignoreCase = true) -> Icons.Filled.Warning
-                    else -> Icons.Filled.Public
+    // SSL Error Dialog
+    if (showSslDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                pendingSslHandler?.cancel()
+                showSslDialog = false
+                pendingSslHandler = null
+            },
+            icon = { Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("Security Warning") },
+            text = { Text("This site's security certificate is not trusted.\n\n$sslErrorMessage\n\nDo you want to proceed anyway?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingSslHandler?.proceed()
+                    showSslDialog = false
+                    pendingSslHandler = null
+                }) {
+                    Text("Proceed", color = MaterialTheme.colorScheme.error)
                 }
-                val canGo = textFieldValue.text.trim().isNotEmpty()
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    pendingSslHandler?.cancel()
+                    showSslDialog = false
+                    pendingSslHandler = null
+                }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
-                OutlinedTextField(
-                    value = textFieldValue,
-                    onValueChange = { textFieldValue = it },
-                    singleLine = true,
+    Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+        // Progress bar (subtle, at the very top)
+        val animatedProgress by animateFloatAsState(
+            targetValue = if (isLoading) progress else 0f,
+            animationSpec = tween(durationMillis = 150),
+            label = "progress"
+        )
+        if (isLoading && animatedProgress > 0f) {
+            LinearProgressIndicator(
+                progress = { animatedProgress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(2.dp),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = Color.Transparent
+            )
+        } else {
+            Spacer(modifier = Modifier.height(2.dp))
+        }
+
+
+        // Find in page bar (conditionally shown)
+        if (isFindMode) {
+            Surface(
+                tonalElevation = 1.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 36.dp)
-                        .clip(RoundedCornerShape(24.dp))
-                        .onFocusChanged { state ->
-                            if (state.isFocused && !isEditing) {
-                                isEditing = true
-                                textFieldValue = TextFieldValue("", selection = TextRange(0))
-                            } else if (!state.isFocused && isEditing) {
-                                isEditing = false
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = findQuery,
+                        onValueChange = { query ->
+                            findQuery = query
+                            if (query.isNotEmpty()) {
+                                webViewRef?.findAllAsync(query)
+                            } else {
+                                webViewRef?.clearMatches()
+                                findMatchCount = 0
+                                findCurrentMatch = 0
                             }
                         },
-                    textStyle = TextStyle(fontSize = 13.sp),
-                    placeholder = { Text("Search or enter address", fontSize = 13.sp) },
-                    keyboardOptions = KeyboardOptions(
-                        imeAction = ImeAction.Go,
-                        keyboardType = KeyboardType.Uri,
-                        autoCorrect = false
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onGo = {
-                            normalizeForGo(textFieldValue.text)?.let { normalized ->
-                                currentUrl = normalized
-                                webViewRef?.loadUrl(normalized)
-                                isEditing = false
-                                focusManager.clearFocus()
-                            }
-                        }
-                    ),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.outline,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                        focusedContainerColor = MaterialTheme.colorScheme.surface,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
-                    ),
-                    leadingIcon = { Icon(leadingIcon, contentDescription = null) },
-                    trailingIcon = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (textFieldValue.text.isNotEmpty()) {
-                                IconButton(onClick = { textFieldValue = TextFieldValue("") }) {
-                                    Icon(Icons.Filled.Close, contentDescription = "Clear")
-                                }
-                            }
-                            IconButton(
-                                onClick = {
-                                    normalizeForGo(textFieldValue.text)?.let { normalized ->
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(findFocusRequester),
+                        placeholder = { Text("Find in page", fontSize = 14.sp) },
+                        singleLine = true,
+                        textStyle = TextStyle(fontSize = 14.sp),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(
+                            onSearch = { webViewRef?.findNext(true) }
+                        ),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = Color.Transparent,
+                            focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant
+                        ),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    if (findQuery.isNotEmpty()) {
+                        Text(
+                            text = if (findMatchCount > 0) "$findCurrentMatch/$findMatchCount" else "0/0",
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(onClick = { webViewRef?.findNext(false) }) {
+                        Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Previous")
+                    }
+                    IconButton(onClick = { webViewRef?.findNext(true) }) {
+                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Next")
+                    }
+                    IconButton(onClick = { isFindMode = false }) {
+                        Icon(Icons.Default.Close, contentDescription = "Close find")
+                    }
+                }
+            }
+        }
+
+        // Elegant Chrome-style address bar
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = Color(0xFF202124) // Chrome's dark toolbar color
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Elegant address bar
+                val focusManager = LocalFocusManager.current
+                val displayUrl = if (isEditing) textFieldValue else currentUrl
+                val securityIcon = when {
+                    displayUrl.startsWith("https://", ignoreCase = true) -> Icons.Default.Lock
+                    displayUrl.startsWith("http://", ignoreCase = true) -> Icons.Default.Warning
+                    else -> Icons.Default.Public
+                }
+                
+                // Display URL - strip protocol for cleaner look
+                val displayText = remember(currentUrl) {
+                    currentUrl
+                        .removePrefix("https://")
+                        .removePrefix("http://")
+                        .removePrefix("www.")
+                        .trimEnd('/')
+                }
+
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(40.dp)
+                        .clickable {
+                            // Always clear and enter edit mode when address bar is tapped
+                            isEditing = true
+                            textFieldValue = ""
+                            // Request focus after a short delay to ensure state is updated
+                            addressFocusRequester.requestFocus()
+                        },
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color(0xFF303134) // Chrome's address bar pill color
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Security icon
+                        Icon(
+                            securityIcon,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = if (displayUrl.startsWith("https://")) 
+                                       Color(0xFF9AA0A6) // Chrome's gray icon color
+                                   else Color(0xFFEA4335) // Chrome's red for warnings
+                        )
+                        
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        // Single TextField - always visible
+                        androidx.compose.foundation.text.BasicTextField(
+                            value = textFieldValue,
+                            onValueChange = { textFieldValue = it },
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .focusRequester(addressFocusRequester)
+                                .onFocusChanged { state ->
+                                    if (state.isFocused) {
+                                        // Always clear when gaining focus (whether from Surface click or direct text tap)
+                                        isEditing = true
+                                        textFieldValue = ""
+                                    } else if (isEditing) {
+                                        // When unfocused, exit edit mode and restore URL
+                                        isEditing = false
+                                        textFieldValue = displayText
+                                    }
+                                },
+                            textStyle = TextStyle(
+                                fontSize = 14.sp,
+                                color = Color(0xFFE8EAED) // Chrome's text color
+                            ),
+                            keyboardOptions = KeyboardOptions(
+                                imeAction = ImeAction.Go,
+                                keyboardType = KeyboardType.Uri
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onGo = {
+                                    normalizeForGo(textFieldValue)?.let { normalized ->
                                         currentUrl = normalized
                                         webViewRef?.loadUrl(normalized)
                                         isEditing = false
                                         focusManager.clearFocus()
                                     }
-                                },
-                                enabled = canGo
-                            ) {
-                                Icon(Icons.Filled.Send, contentDescription = "Go")
+                                }
+                            ),
+                            decorationBox = { innerTextField ->
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.CenterStart
+                                ) {
+                                    if (textFieldValue.isEmpty() && isEditing) {
+                                        Text(
+                                            "Search or enter address",
+                                            style = TextStyle(
+                                                fontSize = 14.sp,
+                                                color = Color(0xFF9AA0A6) // Chrome's placeholder color
+                                            )
+                                        )
+                                    }
+                                    innerTextField()
+                                }
                             }
+                        )
+                        
+                        if (isEditing && textFieldValue.isNotEmpty()) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Clear",
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clickable { textFieldValue = "" },
+                                tint = Color(0xFF9AA0A6)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                        }
+                        
+                        // Go button when editing
+                        if (isEditing) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowForward,
+                                contentDescription = "Go",
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clickable {
+                                        normalizeForGo(textFieldValue)?.let { normalized ->
+                                            currentUrl = normalized
+                                            webViewRef?.loadUrl(normalized)
+                                            isEditing = false
+                                            focusManager.clearFocus()
+                                        }
+                                    },
+                                tint = Color(0xFF8AB4F8) // Chrome's blue accent
+                            )
                         }
                     }
-                )
-            },
-            colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = Color.Transparent,
-                scrolledContainerColor = Color.Transparent
-            ),
-            actions = {
-                IconButton(onClick = { webViewRef?.reload() }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                }
+
+                Spacer(modifier = Modifier.width(4.dp))
+
+                // Refresh button
+                IconButton(
+                    onClick = { webViewRef?.reload() },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Refresh,
+                        contentDescription = "Refresh",
+                        modifier = Modifier.size(20.dp),
+                        tint = Color.White
+                    )
                 }
             }
-        )
+        }
 
-        // Removed linear top loading bar for a cleaner look
-
-        // Suggestions list from history while editing
-        val suggestions = remember(isEditing, textFieldValue.text, history) {
-            if (isEditing) history.filter { it.contains(textFieldValue.text.trim(), ignoreCase = true) }.take(8) else emptyList()
+        // Suggestions list from history while editing - Chrome style
+        val suggestions = remember(isEditing, textFieldValue, history) {
+            if (isEditing) history.filter { it.contains(textFieldValue.trim(), ignoreCase = true) }.take(8) else emptyList()
         }
         if (isEditing && suggestions.isNotEmpty()) {
-            Surface(tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth()) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFF303134), // Chrome's dropdown background
+                shadowElevation = 8.dp
+            ) {
                 LazyColumn(modifier = Modifier.fillMaxWidth()) {
                     items(suggestions) { item ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    textFieldValue = TextFieldValue(item)
+                                    textFieldValue = item
                                     currentUrl = item
                                     webViewRef?.loadUrl(item)
                                     isEditing = false
                                 }
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Filled.Public, contentDescription = null, modifier = Modifier.padding(end = 8.dp))
-                            Text(item, style = MaterialTheme.typography.bodySmall)
+                            // History/Globe icon
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .background(Color(0xFF3C4043), RoundedCornerShape(16.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Default.History,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                    tint = Color(0xFF9AA0A6)
+                                )
+                            }
+                            
+                            Spacer(modifier = Modifier.width(12.dp))
+                            
+                            // URL text
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = item
+                                        .removePrefix("https://")
+                                        .removePrefix("http://")
+                                        .removePrefix("www.")
+                                        .trimEnd('/'),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = Color(0xFFE8EAED),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            
+                            // Arrow icon
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowForward,
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .padding(start = 8.dp),
+                                tint = Color(0xFF9AA0A6)
+                            )
+                        }
+                        
+                        // Subtle divider
+                        if (suggestions.indexOf(item) < suggestions.size - 1) {
+                            HorizontalDivider(
+                                color = Color(0xFF3C4043),
+                                thickness = 0.5.dp,
+                                modifier = Modifier.padding(start = 60.dp)
+                            )
                         }
                     }
                 }
             }
         }
 
+        // WebView container
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
-                    WebView(ctx).apply {
+                    BackgroundAudioWebView(ctx).apply {
+                        // Enable background audio by default when toggle is on
+                        setBackgroundAudioEnabled(isBackgroundAudioEnabled)
                         layoutParams = ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
@@ -261,23 +871,71 @@ fun BrowserScreen(initialUrl: String) {
                         settings.displayZoomControls = false
                         settings.useWideViewPort = true
                         settings.loadWithOverviewMode = true
+                        
+                        // Set User Agent to remove "wv" to look like a real browser (enables Google Login)
+                        settings.userAgentString = settings.userAgentString.replace("; wv", "")
 
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 isLoading = true
-                                canGoBack = this@apply.canGoBack()
-                                canGoForward = this@apply.canGoForward()
+                                canGoBack = canGoBack()
+                                canGoForward = canGoForward()
                                 url?.let { currentUrl = it }
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 isLoading = false
-                                canGoBack = this@apply.canGoBack()
-                                canGoForward = this@apply.canGoForward()
+                                canGoBack = canGoBack()
+                                canGoForward = canGoForward()
                                 url?.let {
                                     currentUrl = it
                                     addToHistory(context.applicationContext, it)
+
+                                    // Inject JavaScript to force "visible" state
+                                    // This prevents YouTube (and others) from pausing video when screen assumes background state
+                                    view?.evaluateJavascript("""
+                                        (function() {
+                                            try {
+                                                console.log("Applying visibility spoof...");
+                                                Object.defineProperty(document, 'hidden', { get: function() { return false; } });
+                                                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; } });
+                                                Object.defineProperty(document, 'webkitVisibilityState', { get: function() { return 'visible'; } });
+                                                
+                                                // Stop visibility events
+                                                window.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                                                document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                                                window.addEventListener('webkitvisibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                                            } catch(e) {
+                                                console.error("Visibility spoof failed", e);
+                                            }
+                                        })();
+                                    """.trimIndent(), null)
+                                    
+                                    // Inject YouTube Ad Blocker script on YouTube pages
+                                    if (it.contains("youtube.com") || it.contains("youtu.be")) {
+                                        view?.evaluateJavascript(YOUTUBE_AD_BLOCK_SCRIPT, null)
+                                    }
                                 }
+                            }
+                            
+                            // Block ad-related network requests
+                            override fun shouldInterceptRequest(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): WebResourceResponse? {
+                                val url = request?.url?.toString() ?: return null
+                                
+                                // Check if this URL should be blocked
+                                if (shouldBlockUrl(url)) {
+                                    // Return empty response to block the request
+                                    return WebResourceResponse(
+                                        "text/plain",
+                                        "UTF-8",
+                                        null  // Empty body
+                                    )
+                                }
+                                
+                                return super.shouldInterceptRequest(view, request)
                             }
 
                             override fun shouldOverrideUrlLoading(
@@ -285,7 +943,6 @@ fun BrowserScreen(initialUrl: String) {
                                 request: WebResourceRequest?
                             ): Boolean {
                                 val uri = request?.url ?: return false
-                                // Let WebView handle http/https. External schemes go to the system.
                                 return if (uri.scheme == "http" || uri.scheme == "https") {
                                     false
                                 } else {
@@ -296,17 +953,39 @@ fun BrowserScreen(initialUrl: String) {
                                     true
                                 }
                             }
+
+                            override fun onReceivedSslError(
+                                view: WebView?,
+                                handler: SslErrorHandler?,
+                                error: SslError?
+                            ) {
+                                val errorMessage = when (error?.primaryError) {
+                                    SslError.SSL_EXPIRED -> "The certificate has expired."
+                                    SslError.SSL_IDMISMATCH -> "The certificate hostname mismatch."
+                                    SslError.SSL_NOTYETVALID -> "The certificate is not yet valid."
+                                    SslError.SSL_UNTRUSTED -> "The certificate authority is not trusted."
+                                    else -> "Unknown SSL error."
+                                }
+                                sslErrorMessage = errorMessage
+                                pendingSslHandler = handler
+                                showSslDialog = true
+                            }
                         }
 
                         webChromeClient = object : WebChromeClient() {
                             override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                progress = newProgress
+                                progress = newProgress / 100f
                             }
 
                             override fun onPermissionRequest(request: PermissionRequest?) {
-                                // Grant camera/mic for getUserMedia when using AR pages
                                 request?.grant(request.resources)
                             }
+                        }
+
+                        // Set find listener for find in page
+                        setFindListener { activeMatchOrdinal, numberOfMatches, _ ->
+                            findMatchCount = numberOfMatches
+                            findCurrentMatch = if (numberOfMatches > 0) activeMatchOrdinal + 1 else 0
                         }
 
                         loadUrl(normalizeInputToUrlOrSearch(initialUrl))
@@ -314,15 +993,16 @@ fun BrowserScreen(initialUrl: String) {
                     }
                 },
                 update = { webView ->
-                    // When initialUrl changes via intent, make sure we load it once
-                    if (webView.url != initialUrl) {
-                        webView.loadUrl(normalizeInputToUrlOrSearch(initialUrl))
-                    }
                     webViewRef = webView
+                    canGoBack = webView.canGoBack()
+                    canGoForward = webView.canGoForward()
+                    // Sync background audio state with WebView
+                    webView.setBackgroundAudioEnabled(isBackgroundAudioEnabled)
                 }
             )
 
-            if (isLoading) {
+            // Center loading spinner (for initial loads)
+            if (isLoading && progress < 0.1f) {
                 CircularProgressIndicator(
                     modifier = Modifier.align(Alignment.Center),
                     color = MaterialTheme.colorScheme.primary
