@@ -12,7 +12,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val startUrl = intent?.dataString ?: "https://www.google.com"
+        val startUrl = intent?.dataString ?: "https://www.google.com?hl=en"
 
         setContent {
             NorthStarTheme {
