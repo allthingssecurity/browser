@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Trust system CA certificates for all domains -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <!-- Trust certificates from the Android system CA store -->
+            <certificates src="system" />
+            <!-- Also trust user-installed certificates if any -->
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

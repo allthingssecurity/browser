@@ -15,30 +15,25 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -58,270 +53,14 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.northstarquest.BackgroundAudioService
 import android.webkit.WebResourceResponse
-import java.net.URLEncoder
 
-/**
- * YouTube Ad Blocker - JavaScript injection script
- * This script runs on YouTube pages to:
- * 1. Auto-click "Skip Ad" buttons
- * 2. Hide ad overlays and banners (but NOT player controls)
- * 
- * FIXED: Removed features that were breaking video playback:
- * - Removed aggressive CSS that hid player controls
- * - Removed video speedup/muting that broke audio
- */
-private const val YOUTUBE_AD_BLOCK_SCRIPT = """
-(function() {
-    'use strict';
-    
-    // Prevent multiple injections
-    if (window.__ytAdBlockerInjected) return;
-    window.__ytAdBlockerInjected = true;
-    
-    // Configuration
-    const CONFIG = {
-        skipButtonInterval: 250,  // Check for skip button every 250ms
-        adCheckInterval: 500,     // Check for ads every 500ms
-        debug: false
-    };
-    
-    function log(msg) {
-        if (CONFIG.debug) console.log('[YT-AdBlock] ' + msg);
-    }
-    
-    // CSS to hide ONLY ad overlay elements (NOT player controls)
-    const adBlockCSS = `
-        /* Hide overlay ads and banners - but NOT player controls */
-        .ytp-ad-overlay-slot,
-        .ytp-ad-text-overlay,
-        .ytp-ad-overlay-container,
-        .ytp-ad-overlay-close-button,
-        .ytp-ad-image-overlay,
-        .ytp-ad-preview-container,
-        .ytp-ad-message-container,
-        .ytd-action-companion-ad-renderer,
-        ytd-promoted-sparkles-web-renderer,
-        ytd-companion-slot-renderer,
-        ytd-promoted-video-renderer,
-        ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-ads"],
-        #masthead-ad,
-        #player-ads,
-        .ytd-banner-promo-renderer,
-        ytd-in-feed-ad-layout-renderer,
-        ytd-ad-slot-renderer,
-        .ytp-featured-product,
-        .ytp-suggested-action,
-        .iv-branding,
-        ytd-mealbar-promo-renderer,
-        yt-mealbar-promo-renderer,
-        ytd-statement-banner-renderer,
-        .ytd-merch-shelf-renderer {
-            display: none !important;
-            visibility: hidden !important;
-            height: 0 !important;
-            opacity: 0 !important;
-        }
-    `;
-    
-    // Inject CSS
-    function injectCSS() {
-        if (document.getElementById('yt-adblock-css')) return;
-        const style = document.createElement('style');
-        style.id = 'yt-adblock-css';
-        style.textContent = adBlockCSS;
-        (document.head || document.documentElement).appendChild(style);
-        log('CSS injected');
-    }
-    
-    // Click skip button if available
-    function clickSkipButton() {
-        const skipButtons = [
-            '.ytp-ad-skip-button',
-            '.ytp-ad-skip-button-modern',
-            '.ytp-skip-ad-button',
-            'button.ytp-ad-skip-button-modern',
-            '.ytp-ad-skip-button-container button',
-            '.videoAdUiSkipButton',
-            '.ytp-ad-skip-button-text'
-        ];
-        
-        for (const selector of skipButtons) {
-            const btn = document.querySelector(selector);
-            if (btn && btn.offsetParent !== null) {
-                btn.click();
-                log('Clicked skip button: ' + selector);
-                return true;
-            }
-        }
-        
-        // Also try clicking by text content
-        const allButtons = document.querySelectorAll('button, .ytp-ad-button');
-        for (const btn of allButtons) {
-            const text = btn.textContent?.toLowerCase() || '';
-            if (text.includes('skip') && btn.offsetParent !== null) {
-                btn.click();
-                log('Clicked skip button by text');
-                return true;
-            }
-        }
-        
-        return false;
-    }
-    
-    // Skip ad by seeking to end (gentle approach - doesn't mute or change speed)
-    function trySkipAd() {
-        const adShowing = document.querySelector('.ad-showing');
-        if (!adShowing) return false;
-        
-        const video = document.querySelector('.html5-main-video');
-        if (!video) return false;
-        
-        // Only try to skip short ads by seeking to end
-        // This preserves audio state
-        if (video.duration && video.duration < 120 && video.duration > 0) {
-            // Don't seek if we're already near the end
-            if (video.currentTime < video.duration - 1) {
-                video.currentTime = video.duration - 0.1;
-                log('Seeked to end of ad');
-            }
-        }
-        
-        return true;
-    }
-    
-    // Remove ad elements from DOM (banner ads, not video player elements)
-    function removeAdElements() {
-        const adSelectors = [
-            'ytd-promoted-sparkles-web-renderer',
-            'ytd-promoted-video-renderer',
-            'ytd-ad-slot-renderer',
-            'ytd-in-feed-ad-layout-renderer',
-            'ytd-banner-promo-renderer',
-            '#masthead-ad'
-        ];
-        
-        adSelectors.forEach(selector => {
-            document.querySelectorAll(selector).forEach(el => {
-                el.remove();
-                log('Removed: ' + selector);
-            });
-        });
-    }
-    
-    // Close any ad-related overlay/popup
-    function closeAdOverlays() {
-        // Close overlay ads
-        const closeButtons = [
-            '.ytp-ad-overlay-close-button',
-            '.ytp-ad-skip-button-icon'
-        ];
-        
-        closeButtons.forEach(selector => {
-            const btn = document.querySelector(selector);
-            if (btn && btn.offsetParent !== null) {
-                btn.click();
-                log('Closed overlay: ' + selector);
-            }
-        });
-    }
-    
-    // Main ad blocking loop
-    function blockAds() {
-        injectCSS();
-        
-        // Try skip button first (safest)
-        if (!clickSkipButton()) {
-            // If no skip button, try seeking
-            trySkipAd();
-        }
-        
-        closeAdOverlays();
-        removeAdElements();
-    }
-    
-    // Initialize
-    function init() {
-        log('Initializing YouTube Ad Blocker v2');
-        
-        // Initial run
-        blockAds();
-        
-        // Set up intervals
-        setInterval(clickSkipButton, CONFIG.skipButtonInterval);
-        setInterval(blockAds, CONFIG.adCheckInterval);
-        
-        // Also run on DOM changes (for dynamic content)
-        let lastCheck = Date.now();
-        const observer = new MutationObserver(() => {
-            // Throttle to avoid performance issues
-            if (Date.now() - lastCheck > 200) {
-                lastCheck = Date.now();
-                clickSkipButton();
-            }
-        });
-        
-        observer.observe(document.body || document.documentElement, {
-            childList: true,
-            subtree: true
-        });
-        
-        log('YouTube Ad Blocker v2 initialized');
-    }
-    
-    // Start when DOM is ready
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-    } else {
-        init();
-    }
-    
-    // Also run on page navigation (YouTube is a SPA)
-    let lastUrl = location.href;
-    new MutationObserver(() => {
-        if (location.href !== lastUrl) {
-            lastUrl = location.href;
-            log('Page navigation detected');
-            setTimeout(blockAds, 500);
-        }
-    }).observe(document, { subtree: true, childList: true });
-    
-})();
-"""
-
-/**
- * List of URL patterns to block for ads
- * CONSERVATIVE list - only blocks external ad networks
- * Avoiding YouTube internal URLs that might break the player
- */
-private val AD_BLOCK_PATTERNS = listOf(
-    // External ad networks only (safe to block)
-    "doubleclick.net",
-    "googleadservices.com",
-    "googlesyndication.com",
-    "moatads.com",
-    "adsrvr.org",
-    "adnxs.com",
-    "scorecardresearch.com",
-    "2mdn.net"
-    // Note: We intentionally don't block YouTube internal ad URLs
-    // as they can break the video player, scrubber, and audio
-)
-
-/**
- * Check if a URL should be blocked
- */
-private fun shouldBlockUrl(url: String): Boolean {
-    val lowerUrl = url.lowercase()
-    return AD_BLOCK_PATTERNS.any { pattern ->
-        if (pattern.contains("*")) {
-            // Simple wildcard matching
-            val regex = pattern.replace(".", "\\.").replace("*", ".*")
-            lowerUrl.matches(Regex(".*$regex.*"))
-        } else {
-            lowerUrl.contains(pattern)
-        }
-    }
-}
+// Import modular browser components
+import com.example.northstarquest.browser.AdBlocker
+import com.example.northstarquest.browser.SslHelper
+import com.example.northstarquest.browser.YouTubeAdBlocker
+import com.example.northstarquest.browser.BrowserHistory
+import com.example.northstarquest.browser.UrlUtils
+import com.example.northstarquest.browser.ErrorHandler
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -408,41 +147,19 @@ fun BrowserScreen(initialUrl: String) {
         }
     }
 
-    fun loadHistory(ctx: Context): MutableList<String> {
-        val prefs = ctx.getSharedPreferences("browser_prefs", Context.MODE_PRIVATE)
-        val raw = prefs.getString("history", "") ?: ""
-        return if (raw.isBlank()) mutableListOf() else raw.split('\n').filter { it.isNotBlank() }.toMutableList()
-    }
-
-    fun saveHistory(ctx: Context, list: List<String>) {
-        val prefs = ctx.getSharedPreferences("browser_prefs", Context.MODE_PRIVATE)
-        prefs.edit().putString("history", list.joinToString("\n")).apply()
-    }
-
+    // History management using modular BrowserHistory class
     fun addToHistory(ctx: Context, url: String) {
-        if (url.isBlank()) return
-        val clean = url.trim()
-        val existing = history.toMutableList()
-        existing.removeAll { it.equals(clean, ignoreCase = true) }
-        existing.add(0, clean)
-        val capped = existing.take(50)
-        history.clear(); history.addAll(capped)
-        saveHistory(ctx, capped)
+        BrowserHistory.addUrl(ctx, url, history)
     }
 
     LaunchedEffect(Unit) {
-        history.clear(); history.addAll(loadHistory(appContext))
+        history.clear(); history.addAll(BrowserHistory.load(appContext))
     }
 
     // Sync address bar with current URL when not editing
     LaunchedEffect(currentUrl) {
         if (!isEditing) {
-            val cleanUrl = currentUrl
-                .removePrefix("https://")
-                .removePrefix("http://")
-                .removePrefix("www.")
-                .trimEnd('/')
-            textFieldValue = cleanUrl
+            textFieldValue = UrlUtils.cleanForDisplay(currentUrl)
         }
     }
 
@@ -458,24 +175,8 @@ fun BrowserScreen(initialUrl: String) {
         }
     }
 
-    fun normalizeInputToUrlOrSearch(input: String): String {
-        val trimmed = input.trim()
-        if (trimmed.isEmpty()) return "https://www.google.com?hl=en"
-        val lower = trimmed.lowercase()
-        val hasScheme = lower.startsWith("http://") || lower.startsWith("https://")
-        val looksLikeHost = Regex("^[a-zA-Z0-9-]+(\\.[a-zA-Z0-9-]+)*(/.*)?$").matches(trimmed)
-        return when {
-            hasScheme -> trimmed
-            looksLikeHost -> "https://$trimmed"
-            else -> "https://www.google.com/search?hl=en&q=" + URLEncoder.encode(trimmed, "UTF-8")
-        }
-    }
-
-    fun normalizeForGo(input: String): String? {
-        val trimmed = input.trim()
-        if (trimmed.isEmpty()) return null
-        return normalizeInputToUrlOrSearch(trimmed)
-    }
+    // URL normalization using modular UrlUtils class
+    fun normalizeForGo(input: String): String? = UrlUtils.normalizeForGo(input)
 
     // Handle back press
     BackHandler(enabled = canGoBack || isFindMode) {
@@ -912,8 +613,8 @@ fun BrowserScreen(initialUrl: String) {
                                     """.trimIndent(), null)
                                     
                                     // Inject YouTube Ad Blocker script on YouTube pages
-                                    if (it.contains("youtube.com") || it.contains("youtu.be")) {
-                                        view?.evaluateJavascript(YOUTUBE_AD_BLOCK_SCRIPT, null)
+                                    if (YouTubeAdBlocker.isYouTubeUrl(it)) {
+                                        view?.evaluateJavascript(YouTubeAdBlocker.script, null)
                                     }
                                 }
                             }
@@ -926,7 +627,7 @@ fun BrowserScreen(initialUrl: String) {
                                 val url = request?.url?.toString() ?: return null
                                 
                                 // Check if this URL should be blocked
-                                if (shouldBlockUrl(url)) {
+                                if (AdBlocker.shouldBlock(url)) {
                                     // Return empty response to block the request
                                     return WebResourceResponse(
                                         "text/plain",
@@ -959,16 +660,21 @@ fun BrowserScreen(initialUrl: String) {
                                 handler: SslErrorHandler?,
                                 error: SslError?
                             ) {
-                                val errorMessage = when (error?.primaryError) {
-                                    SslError.SSL_EXPIRED -> "The certificate has expired."
-                                    SslError.SSL_IDMISMATCH -> "The certificate hostname mismatch."
-                                    SslError.SSL_NOTYETVALID -> "The certificate is not yet valid."
-                                    SslError.SSL_UNTRUSTED -> "The certificate authority is not trusted."
-                                    else -> "Unknown SSL error."
+                                // Use modular SSL helper for Chrome-like certificate validation
+                                SslHelper.handleSslError(handler, error) { errorMessage ->
+                                    sslErrorMessage = errorMessage
+                                    pendingSslHandler = handler
+                                    showSslDialog = true
                                 }
-                                sslErrorMessage = errorMessage
-                                pendingSslHandler = handler
-                                showSslDialog = true
+                            }
+                            
+                            // Handle page load errors - redirect to Google search like Chrome
+                            override fun onReceivedError(
+                                view: WebView?,
+                                request: android.webkit.WebResourceRequest?,
+                                error: android.webkit.WebResourceError?
+                            ) {
+                                ErrorHandler.handleError(view, request, error)
                             }
                         }
 
@@ -988,7 +694,7 @@ fun BrowserScreen(initialUrl: String) {
                             findCurrentMatch = if (numberOfMatches > 0) activeMatchOrdinal + 1 else 0
                         }
 
-                        loadUrl(normalizeInputToUrlOrSearch(initialUrl))
+                        loadUrl(UrlUtils.normalizeToUrlOrSearch(initialUrl))
                         webViewRef = this
                     }
                 },
